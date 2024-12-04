@@ -1,0 +1,497 @@
+#include <Trade\Trade.mqh>
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//|               © Jayson Trading Group FX                          |
+//|                                                                  |
+//|      Ce robot est la propriété de Jayson Trading Group FX.       |
+//|      Pour plus d'informations, visitez : www.google.com          |
+//|                                                                  |
+//+------------------------------------------------------------------+
+
+#property strict
+#property copyright "© Jayson Trading Group FX"
+#property link      "www.google.com"
+
+input double lot_size = 0.1;            // Lot size
+input double take_profit = 100;         // Take profit in points
+input double stop_loss = 50;            // Stop loss in points
+input int max_trades = 5;               // Maximum number of trades
+input int activation_key = 0;           // Activation key
+input double daily_profit_target = 100; // Daily profit target in account currency
+input double daily_loss_limit = 50;     // Daily loss limit in account currency
+
+input bool enable_break_even = true;     // Activer le break-even
+input int break_even_point = 100;        // Point de gain pour activer le break-even
+input int break_even_sl = 20;            // Niveau de stop loss après activation du break-even
+
+input bool enable_target_amount = true;  // Activer le montant cible
+input double target_amount = 50;         // Montant d'objectif par position
+
+input bool enable_trade_time = true;     // Activer le contrôle des heures de trading
+input int trade_start_hour = 9;          // Heure de début de trading (24h format)
+input int trade_end_hour = 17;           // Heure de fin de trading (24h format)
+
+datetime expiration_date = D'2025.06.01'; // Expiration date
+
+double initial_balance;                   // Initial account balance
+double daily_profit_loss;                 // Daily profit/loss
+
+CTrade trade;
+
+int valid_keys[] = {62004409, 12345678, 87654321, 11223344}; // Liste des clés d'activation valides
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   long chart_id = ChartID();
+   ChartSetInteger(chart_id, CHART_COLOR_BACKGROUND, clrWhite);
+   ChartSetInteger(chart_id, CHART_COLOR_FOREGROUND, clrBlack);
+   ChartSetInteger(chart_id, CHART_COLOR_GRID, clrWhite);
+   ChartSetInteger(chart_id, CHART_COLOR_CANDLE_BULL, clrBlue);   // Bougie en hausse
+   ChartSetInteger(chart_id, CHART_COLOR_CANDLE_BEAR, clrRed);    // Bougie en baisse
+
+   // Dessiner le panneau
+   DrawPanel();
+
+   if (!IsActivated())
+   {
+      Print("Activation failed. Please enter a valid key.");
+      return(INIT_FAILED);
+   }
+
+   if (TimeCurrent() > expiration_date)
+   {
+      Print("The EA has expired.");
+      return(INIT_FAILED);
+   }
+
+   initial_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   daily_profit_loss = 0.0;
+
+   EventSetTimer(60);
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   // Supprimer le panneau lors de la désinitialisation
+   ObjectDelete(0, "Panel");
+   ObjectDelete(0, "Title");
+   ObjectDelete(0, "InitialBalance");
+   ObjectDelete(0, "DailyProfitLoss");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if (!IsActivated() || TimeCurrent() > expiration_date)
+   {
+      return;
+   }
+
+   if (enable_trade_time && !IsTradingTime())
+   {
+      Print("Trading is not allowed at this time.");
+      return;
+   }
+
+   double current_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   daily_profit_loss = current_balance - initial_balance;
+
+   if (daily_profit_loss >= daily_profit_target)
+   {
+      Print("Daily profit target reached. Stopping the EA.");
+      ExpertRemove();
+      return;
+   }
+   else if (daily_profit_loss <= -daily_loss_limit)
+   {
+      Print("Daily loss limit reached. Stopping the EA.");
+      ExpertRemove();
+      return;
+   }
+
+   if (CountOpenPositions() >= max_trades)
+   {
+      Print("Maximum number of trades reached. No new trades will be opened.");
+      return;
+   }
+
+   if (enable_break_even)
+   {
+      ManageBreakEven();
+   }
+
+   if (enable_target_amount)
+   {
+      CheckTargetAmount();
+   }
+
+   double K[], D[];
+   int KPeriod = 34;
+   int DPeriod = 3;
+   int Slowing = 3;
+   int levels[] = {10, 90};
+
+   int stoch_handle = iStochastic(_Symbol, PERIOD_CURRENT, KPeriod, Slowing, DPeriod, MODE_SMA, STO_LOWHIGH);
+   if (stoch_handle == INVALID_HANDLE)
+   {
+      Print("Error creating stochastic handle: ", GetLastError());
+      return;
+   }
+
+   if (CopyBuffer(stoch_handle, 0, 0, 3, K) <= 0 || CopyBuffer(stoch_handle, 1, 0, 3, D) <= 0)
+   {
+      Print("Error copying buffer: ", GetLastError());
+      IndicatorRelease(stoch_handle);
+      return;
+   }
+
+   // Un signal de vente se produit lorsque %K croise en dessous de %D dans la zone de surachat
+   if (K[1] > levels[1] && K[1] > D[1] && K[0] < D[0])
+   {
+      ClosePositions(POSITION_TYPE_BUY);
+      OpenSell();
+   }
+// Un signal d'achat se produit lorsque %K croise au-dessus de %D dans la zone de survente
+else if (K[1] < levels[0] && K[1] < D[1] && K[0] > D[0])
+{
+   ClosePositions(POSITION_TYPE_SELL);
+   OpenPosition(ORDER_TYPE_BUY, "Le Jayson EA");
+}
+
+
+   IndicatorRelease(stoch_handle);
+
+   // Mettre à jour le panneau
+   UpdatePanel();
+}
+
+//+------------------------------------------------------------------+
+//| Function to draw the panel                                       |
+//+------------------------------------------------------------------+
+void DrawPanel()
+{
+   int panel_width = 250;
+   int panel_height = 80;
+
+   // Calculer les distances pour centrer le panneau
+   int chart_width = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int chart_height = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+
+   int x_distance = (chart_width - panel_width) / 2;
+   int y_distance = (chart_height - panel_height) / 2;
+
+   // Dessiner le rectangle du panneau
+   if (ObjectFind(0, "Panel") < 0)
+   {
+      ObjectCreate(0, "Panel", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "Panel", OBJPROP_XSIZE, panel_width);
+      ObjectSetInteger(0, "Panel", OBJPROP_YSIZE, panel_height);
+      ObjectSetInteger(0, "Panel", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "Panel", OBJPROP_XDISTANCE, x_distance);
+      ObjectSetInteger(0, "Panel", OBJPROP_YDISTANCE, y_distance);
+      ObjectSetInteger(0, "Panel", OBJPROP_COLOR, clrBlack);
+      ObjectSetInteger(0, "Panel", OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, "Panel", OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, "Panel", OBJPROP_BACK, true);
+   }
+
+   // Dessiner le titre
+   if (ObjectFind(0, "Title") < 0)
+   {
+      ObjectCreate(0, "Title", OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "Title", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "Title", OBJPROP_XDISTANCE, x_distance + 10);
+      ObjectSetInteger(0, "Title", OBJPROP_YDISTANCE, y_distance + 10);
+      ObjectSetInteger(0, "Title", OBJPROP_COLOR, clrBlack);
+      ObjectSetInteger(0, "Title", OBJPROP_FONTSIZE, 14);
+      ObjectSetString(0, "Title", OBJPROP_TEXT, "Jayson EA FX");
+   }
+
+   // Dessiner le solde initial
+   if (ObjectFind(0, "InitialBalance") < 0)
+   {
+      ObjectCreate(0, "InitialBalance", OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "InitialBalance", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "InitialBalance", OBJPROP_XDISTANCE, x_distance + 10);
+      ObjectSetInteger(0, "InitialBalance", OBJPROP_YDISTANCE, y_distance + 30);
+      ObjectSetInteger(0, "InitialBalance", OBJPROP_COLOR, clrBlack);
+      ObjectSetInteger(0, "InitialBalance", OBJPROP_FONTSIZE, 12);
+      ObjectSetString(0, "InitialBalance", OBJPROP_TEXT, "Solde Départ: " + DoubleToString(initial_balance, 2));
+   }
+
+   // Dessiner le gain du jour
+   if (ObjectFind(0, "DailyProfitLoss") < 0)
+   {
+      ObjectCreate(0, "DailyProfitLoss", OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "DailyProfitLoss", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "DailyProfitLoss", OBJPROP_XDISTANCE, x_distance + 10);
+      ObjectSetInteger(0, "DailyProfitLoss", OBJPROP_YDISTANCE, y_distance + 50);
+      ObjectSetInteger(0, "DailyProfitLoss", OBJPROP_COLOR, clrBlack);
+      ObjectSetInteger(0, "DailyProfitLoss", OBJPROP_FONTSIZE, 12);
+      ObjectSetString(0, "DailyProfitLoss", OBJPROP_TEXT, "Gain du jour: " + DoubleToString(daily_profit_loss, 2));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to update the panel                                     |
+//+------------------------------------------------------------------+
+void UpdatePanel()
+{
+   // Mettre à jour le solde initial
+   string initial_balance_str = StringFormat("Solde Départ: %.2f USD", initial_balance);
+   ObjectSetString(0, "InitialBalance", OBJPROP_TEXT, initial_balance_str);
+
+   // Mettre à jour le gain du jour
+   string daily_profit_loss_str = StringFormat("Gain du jour: %.2f USD", daily_profit_loss);
+   ObjectSetString(0, "DailyProfitLoss", OBJPROP_TEXT, daily_profit_loss_str);
+}
+
+//+------------------------------------------------------------------+
+//| Function to open a buy position                                  |
+//+------------------------------------------------------------------+
+void q()
+{
+   if (CountOpenPositions() < max_trades)
+   {
+      OpenPosition(ORDER_TYPE_BUY, "Le Jayson EA");
+   }
+   else
+   {
+      Print("Maximum number of trades reached. Cannot open new buy position.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to open a sell position                                 |
+//+------------------------------------------------------------------+
+void OpenSell()
+{
+   if (CountOpenPositions() < max_trades)
+   {
+      OpenPosition(ORDER_TYPE_SELL, "Le Jayson EA");
+   }
+   else
+   {
+      Print("Maximum number of trades reached. Cannot open new sell position.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Helper function to open a position                               |
+//+------------------------------------------------------------------+
+void OpenPosition(int type, string comment)
+{
+   double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl = 0; // Par défaut, pas de SL
+   double tp = (type == ORDER_TYPE_BUY) ? price + take_profit * _Point : price - take_profit * _Point;
+
+   // Si un SL est défini (différent de 0), calculez-le
+   if (stop_loss > 0)
+   {
+      sl = (type == ORDER_TYPE_BUY) ? price - stop_loss * _Point : price + stop_loss * _Point;
+      sl = NormalizeDouble(sl, _Digits);
+   }
+
+   price = NormalizeDouble(price, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lot_size;
+   request.type = type;
+   request.price = price;
+   request.tp = tp;
+   request.deviation = 3;
+   request.magic = 0;
+   request.comment = comment;
+
+   // Ajout du SL uniquement si sa valeur est différente de 0
+   if (sl > 0)
+   {
+      request.sl = sl;
+   }
+
+   if (!OrderSend(request, result))
+   {
+      Print("Error opening position (", comment, "): ", GetLastError());
+   }
+   else
+   {
+      Print("Position opened successfully: ", comment);
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| Function to count the number of open positions                   |
+//+------------------------------------------------------------------+
+int CountOpenPositions()
+{
+   int count = 0;
+   for (int i = 0; i < PositionsTotal(); i++)
+   {
+      if (PositionGetSymbol(i) == _Symbol)
+      {
+         count++;
+      }
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Function to close positions                                      |
+//+------------------------------------------------------------------+
+void ClosePositions(int type)
+{
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket != 0 && PositionSelect(ticket))
+      {
+         if (PositionGetInteger(POSITION_TYPE) == type && PositionGetString(POSITION_SYMBOL) == _Symbol)
+         {
+            if (!trade.PositionClose(ticket))
+            {
+               Print("Error closing position: ", trade.ResultRetcode());
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to check activation key and expiration date             |
+//+------------------------------------------------------------------+
+bool IsActivated()
+{
+   for (int i = 0; i < ArraySize(valid_keys); i++)
+   {
+      if (activation_key == valid_keys[i])
+      {
+         return (TimeCurrent() <= expiration_date);
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Function to manage break-even                                    |
+//+------------------------------------------------------------------+
+void ManageBreakEven()
+{
+   for (int i = 0; i < PositionsTotal(); i++)
+   {
+      if (PositionGetSymbol(i) == _Symbol)
+      {
+         ulong ticket = PositionGetTicket(i);
+         double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+         double current_price = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double stop_loss = PositionGetDouble(POSITION_SL);
+         int position_type = PositionGetInteger(POSITION_TYPE);
+
+         if (position_type == POSITION_TYPE_BUY)
+         {
+            if (current_price - open_price >= break_even_point * _Point)
+            {
+               double new_sl = open_price + break_even_sl * _Point;
+               if (stop_loss < new_sl)
+               {
+                  ModifyPositionSL(ticket, new_sl);
+               }
+            }
+         }
+         else if (position_type == POSITION_TYPE_SELL)
+         {
+            if (open_price - current_price >= break_even_point * _Point)
+            {
+               double new_sl = open_price - break_even_sl * _Point;
+               if (stop_loss > new_sl)
+               {
+                  ModifyPositionSL(ticket, new_sl);
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to modify stop loss                                     |
+//+------------------------------------------------------------------+
+void ModifyPositionSL(ulong ticket, double new_sl)
+{
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action = TRADE_ACTION_SLTP;
+   request.position = ticket;
+   request.sl = NormalizeDouble(new_sl, _Digits);
+
+   if (!OrderSend(request, result))
+   {
+      Print("Error modifying SL for position: ", GetLastError());
+   }
+   else
+   {
+      Print("SL modified successfully for position: ", ticket);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to check target amount                                  |
+//+------------------------------------------------------------------+
+void CheckTargetAmount()
+{
+   for (int i = 0; i < PositionsTotal(); i++)
+   {
+      if (PositionGetSymbol(i) == _Symbol)
+      {
+         ulong ticket = PositionGetTicket(i);
+         double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+         double current_price = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         int position_type = PositionGetInteger(POSITION_TYPE);
+
+         if (enable_target_amount && profit >= target_amount)
+         {
+            if (!trade.PositionClose(ticket))
+            {
+               Print("Error closing position (target amount reached): ", trade.ResultRetcode());
+            }
+            else
+            {
+               Print("Position closed successfully (target amount reached): ", ticket);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Function to check if trading is allowed at the current time      |
+//+------------------------------------------------------------------+
+bool IsTradingTime()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int current_hour = dt.hour;
+   return (current_hour >= trade_start_hour && current_hour < trade_end_hour);
+}
