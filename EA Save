@@ -1,0 +1,153 @@
+//+------------------------------------------------------------------+
+//| Paramètres de l'Expert                                           |
+//+------------------------------------------------------------------+
+input string actif = "EURUSD";       // Actif à surveiller
+input double lot_size = 0.1;         // Taille des lots
+input double seuil_perte = 50; // Seuil de perte (en points)
+input double stop_loss = 50;         // Stop Loss (en points)
+input double take_profit = 100;      // Take Profit (en points)
+input int max_trades = 5;            // Nombre maximum de positions ouvertes
+input string commentaire = "Trade Robot"; // Commentaire pour identifier les positions
+
+static long tickets_traitees[];      // Tableau pour stocker les tickets déjà traités
+
+//+------------------------------------------------------------------+
+//| Fonction principale                                              |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // Vérifie si l'actif est valide
+    if (!SymbolInfoDouble(actif, SYMBOL_BID))
+    {
+        Print("Erreur : Actif introuvable ou invalide : ", actif);
+        return;
+    }
+
+    // Récupère le nombre total de positions ouvertes
+    int total_positions = PositionsTotal();
+    Print("Total positions ouvertes : ", total_positions);
+
+    // Boucle sur chaque position ouverte
+    for (int i = 0; i < total_positions; i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (PositionSelectByTicket(ticket))
+        {
+            string position_symbol = PositionGetString(POSITION_SYMBOL);
+            if (position_symbol == actif)
+            {
+                if (!ArrayContient(tickets_traitees, ticket))
+                {
+                    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+                    double current_price = SymbolInfoDouble(actif, SYMBOL_BID);
+                    int direction = PositionGetInteger(POSITION_TYPE); // BUY=0, SELL=1
+
+                    // Calcul des pertes en fonction du type de position
+                    double perte = (direction == POSITION_TYPE_SELL) ?
+                        (current_price - open_price) / SymbolInfoDouble(actif, SYMBOL_POINT) :
+                        (open_price - current_price) / SymbolInfoDouble(actif, SYMBOL_POINT);
+
+                    Print("Ticket : ", ticket, ", Perte calculée : ", perte);
+
+                    // Ouvre une nouvelle position si la perte dépasse le seuil (en valeur absolue)
+                    if (perte >= seuil_perte && PositionsTotal() < max_trades)
+                    {
+                        Print("Seuil de perte atteint. Tentative d'ouverture d'une nouvelle position...");
+                        ENUM_ORDER_TYPE type = (direction == POSITION_TYPE_SELL) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+                        if (OuvrirPosition(actif, type, lot_size, stop_loss, take_profit, commentaire))
+                        {
+                            AjouterTicket(tickets_traitees, ticket); // Marquer le ticket comme traité
+                            Print("Nouvelle position ouverte.");
+                        }
+                    }
+                    else
+                    {
+                        Print("Conditions non remplies. Perte : ", perte, ", seuil : ", seuil_perte, ", Total positions : ", PositionsTotal());
+                    }
+                }
+                else
+                {
+                    Print("Position déjà traitée. Ticket : ", ticket);
+                }
+            }
+        }
+    }
+}
+
+
+//+------------------------------------------------------------------+
+//| Fonction pour ajouter un ticket à un tableau                    |
+//+------------------------------------------------------------------+
+void AjouterTicket(long &arr[], ulong ticket)
+{
+    int current_size = ArraySize(arr);  // Taille actuelle
+    ArrayResize(arr, current_size + 1); // Agrandir le tableau
+    arr[current_size] = ticket;         // Ajouter le ticket
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si un ticket est dans le tableau                        |
+//+------------------------------------------------------------------+
+bool ArrayContient(long &arr[], ulong ticket)
+{
+    for (int i = 0; i < ArraySize(arr); i++)
+    {
+        if (arr[i] == ticket)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Fonction pour ouvrir une position                               |
+//+------------------------------------------------------------------+
+bool OuvrirPosition(string symbole, ENUM_ORDER_TYPE type, double lot_size, double sl_points, double tp_points, string commentaire)
+{
+    MqlTradeRequest request;
+    MqlTradeResult result;
+    ZeroMemory(request);
+    ZeroMemory(result);
+
+    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(symbole, SYMBOL_ASK) : SymbolInfoDouble(symbole, SYMBOL_BID);
+    double point = SymbolInfoDouble(symbole, SYMBOL_POINT);
+
+    // Gestion des Stop Loss et Take Profit
+    if (sl_points > 0)
+    {
+        request.sl = (type == ORDER_TYPE_BUY) ? price - sl_points * point : price + sl_points * point;
+    }
+    else
+    {
+        request.sl = 0.0; // Aucun Stop Loss
+    }
+
+    if (tp_points > 0)
+    {
+        request.tp = (type == ORDER_TYPE_BUY) ? price + tp_points * point : price - tp_points * point;
+    }
+    else
+    {
+        request.tp = 0.0; // Aucun Take Profit
+    }
+
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = symbole;
+    request.type = type;
+    request.volume = lot_size;
+    request.price = price;
+    request.deviation = 10; // Tolérance de slippage
+    request.comment = commentaire; // Ajout du commentaire
+
+    if (!OrderSend(request, result))
+    {
+        Print("Erreur lors de l'ouverture de la position : ", GetLastError());
+        return false;
+    }
+    else
+    {
+        Print("Position ouverte avec succès : ", result.order, ", Commentaire : ", commentaire);
+        return true;
+    }
+}
